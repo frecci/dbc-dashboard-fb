@@ -4,6 +4,9 @@ import * as XLSX from "xlsx";
 
 const ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID;
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET() {
   try {
     const drive = getDriveClient();
@@ -19,19 +22,18 @@ export async function GET() {
         const files = await listFiles(drive, clientFolder.id);
         let kpis = {};
         let lastUpdate = null;
-        const debugInfo = { filesFound: files.map(f => ({ name: f.name, mime: f.mimeType })), sheetsFound: [] };
+        const sheetsFound = [];
 
         for (const file of files.slice(0, 5)) {
           try {
             const buffer = await downloadFile(drive, file);
             const workbook = XLSX.read(buffer, { type: "buffer" });
-            debugInfo.sheetsFound = workbook.SheetNames;
+            sheetsFound.push(...workbook.SheetNames);
             const allSheets = {};
             workbook.SheetNames.forEach(name => {
               allSheets[name] = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null });
             });
             const parsed = parseRealXlsx(allSheets);
-            console.log("Parsed KPIs:", JSON.stringify(parsed));
             kpis = { ...kpis, ...parsed };
             if (!lastUpdate || new Date(file.modifiedTime) > new Date(lastUpdate)) {
               lastUpdate = file.modifiedTime;
@@ -41,20 +43,20 @@ export async function GET() {
           }
         }
 
-        console.log("Debug:", JSON.stringify(debugInfo));
         const level = detectLevel(clientFolder.name);
         const clientName = clientFolder.name.replace(/^DBC\s*[-–]\s*/i, "").replace(/\s*[-–]\s*(base|avanzato|quantico)/i, "").trim();
-
-        clients.push({ id: clientFolder.id, name: clientName, level, kpis, lastUpdate, filesCount: files.length, _debug: debugInfo });
+        clients.push({ id: clientFolder.id, name: clientName, level, kpis, lastUpdate, filesCount: files.length, _sheets: sheetsFound });
       }
 
       coaches.push({ id: coachFolder.id, name: coachName, clients });
     }
 
-    return Response.json({ coaches, updatedAt: new Date().toISOString() });
+    return new Response(JSON.stringify({ coaches, updatedAt: new Date().toISOString() }), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store, no-cache, must-revalidate" }
+    });
   } catch (error) {
     console.error("Drive API error:", error);
-    return Response.json({ error: error.message }, { status: 500 });
+    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
   }
 }
 
