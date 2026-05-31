@@ -54,3 +54,4 @@ dal nome della cartella. Se il nome contiene "avanzato" → Avanzato, "quantico"
 - Riserva liquidità
 - Preventivi emessi
 - % Chiusura nuovi pazienti
+# force rebuild
