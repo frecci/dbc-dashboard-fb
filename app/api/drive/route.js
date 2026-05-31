@@ -1,8 +1,8 @@
 import { getDriveClient, listFolders, listFiles, downloadFile } from "@/lib/drive";
-import { parseOdsKpis, parseXlsxKpis } from "@/lib/kpi";
+import { parseRealXlsx } from "@/lib/kpi";
 import * as XLSX from "xlsx";
 
-const ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID || "1WsN8SPQ1zMn9RpQdjciJ8lTKVkPTXPC6";
+const ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID;
 
 export async function GET() {
   try {
@@ -11,7 +11,7 @@ export async function GET() {
     const coaches = [];
 
     for (const coachFolder of coachFolders) {
-      const coachName = coachFolder.name.replace("DBC - ", "").trim();
+      const coachName = coachFolder.name.replace(/^DBC\s*[-–]\s*/i, "").trim();
       const clientFolders = await listFolders(drive, coachFolder.id);
       const clients = [];
 
@@ -19,27 +19,20 @@ export async function GET() {
         const files = await listFiles(drive, clientFolder.id);
         let kpis = {};
         let lastUpdate = null;
+        const debugInfo = { filesFound: files.map(f => ({ name: f.name, mime: f.mimeType })), sheetsFound: [] };
 
-        for (const file of files.slice(0, 3)) {
+        for (const file of files.slice(0, 5)) {
           try {
-            const buffer = await downloadFile(drive, file.id);
+            const buffer = await downloadFile(drive, file);
             const workbook = XLSX.read(buffer, { type: "buffer" });
+            debugInfo.sheetsFound = workbook.SheetNames;
             const allSheets = {};
             workbook.SheetNames.forEach(name => {
               allSheets[name] = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null });
             });
-
-            const sheetNames = workbook.SheetNames.join(" ").toLowerCase();
-            if (sheetNames.includes("saturazione") || sheetNames.includes("customer") || sheetNames.includes("cashflow")) {
-              Object.values(allSheets).forEach(rows => {
-                const parsed = parseOdsKpis(rows);
-                kpis = { ...kpis, ...parsed };
-              });
-            } else {
-              const parsed = parseXlsxKpis(allSheets);
-              kpis = { ...kpis, ...parsed };
-            }
-
+            const parsed = parseRealXlsx(allSheets);
+            console.log("Parsed KPIs:", JSON.stringify(parsed));
+            kpis = { ...kpis, ...parsed };
             if (!lastUpdate || new Date(file.modifiedTime) > new Date(lastUpdate)) {
               lastUpdate = file.modifiedTime;
             }
@@ -48,25 +41,14 @@ export async function GET() {
           }
         }
 
-        const nameParts = clientFolder.name.replace("DBC - ", "").split(" - ");
+        console.log("Debug:", JSON.stringify(debugInfo));
         const level = detectLevel(clientFolder.name);
+        const clientName = clientFolder.name.replace(/^DBC\s*[-–]\s*/i, "").replace(/\s*[-–]\s*(base|avanzato|quantico)/i, "").trim();
 
-        clients.push({
-          id: clientFolder.id,
-          name: nameParts[0] || clientFolder.name,
-          folderName: clientFolder.name,
-          level,
-          kpis,
-          lastUpdate,
-          filesCount: files.length,
-        });
+        clients.push({ id: clientFolder.id, name: clientName, level, kpis, lastUpdate, filesCount: files.length, _debug: debugInfo });
       }
 
-      coaches.push({
-        id: coachFolder.id,
-        name: coachName,
-        clients,
-      });
+      coaches.push({ id: coachFolder.id, name: coachName, clients });
     }
 
     return Response.json({ coaches, updatedAt: new Date().toISOString() });
@@ -76,8 +58,8 @@ export async function GET() {
   }
 }
 
-function detectLevel(folderName) {
-  const n = folderName.toLowerCase();
+function detectLevel(name) {
+  const n = name.toLowerCase();
   if (n.includes("quantico") || n.includes("qua")) return "quantico";
   if (n.includes("avanzato") || n.includes("ava")) return "avanzato";
   return "base";
