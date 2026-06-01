@@ -1,6 +1,10 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { BENCHMARKS, getStatus, avgKpis } from "@/lib/kpi";
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer
+} from "recharts";
 
 const STATUS_COLOR = { green: "#3B6D11", yellow: "#854F0B", red: "#A32D2D", gray: "#5F5E5A" };
 const STATUS_BG = { green: "#EAF3DE", yellow: "#FAEEDA", red: "#FCEBEB", gray: "#F1EFE8" };
@@ -9,6 +13,8 @@ const LEVEL_STYLE = {
   avanzato: { bg: "#EEEDFE", color: "#534AB7", label: "Avanzato" },
   quantico: { bg: "#E1F5EE", color: "#0F6E56", label: "Quantico" },
 };
+
+const HISTORY_FILE_ID = process.env.NEXT_PUBLIC_HISTORY_FILE_ID || "";
 
 function Badge({ level }) {
   const s = LEVEL_STYLE[level] || LEVEL_STYLE.base;
@@ -64,6 +70,80 @@ function Card({ title, children }) {
     <div style={{ background: "var(--card)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "1rem 1.25rem", marginBottom: "1rem" }}>
       {title && <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>{title}</div>}
       {children}
+    </div>
+  );
+}
+
+function fmtEuro(v) {
+  if (v == null) return "—";
+  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(v);
+}
+
+function HistoryChart({ clienteName, coachName }) {
+  const [history, setHistory] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!clienteName || !coachName) return;
+    setLoading(true);
+    fetch(`/api/history?fileId=${HISTORY_FILE_ID}&coach=${encodeURIComponent(coachName)}&cliente=${encodeURIComponent(clienteName)}`)
+      .then(r => r.json())
+      .then(d => { setHistory(d.chartData || null); })
+      .catch(() => setHistory(null))
+      .finally(() => setLoading(false));
+  }, [clienteName, coachName]);
+
+  if (loading) return <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "1rem 0" }}>Caricamento storico...</div>;
+  if (!history || history.length === 0) return <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "1rem 0" }}>Nessun dato storico disponibile per questo cliente.</div>;
+
+  const primo = history[0];
+  const ultimo = history[history.length - 1];
+  const deltaRic = primo?.ricavi && ultimo?.ricavi
+    ? ((ultimo.ricavi - primo.ricavi) / primo.ricavi * 100).toFixed(1)
+    : null;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          {history.length} anni di coaching · {primo.anno} → {ultimo.anno}
+        </div>
+        {deltaRic && (
+          <div style={{ fontSize: 18, fontWeight: 600, color: parseFloat(deltaRic) >= 0 ? "#3B6D11" : "#A32D2D" }}>
+            +{deltaRic}% ricavi
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        {[
+          { label: "Ricavi ultimo anno", value: fmtEuro(ultimo.ricavi) },
+          { label: "MOL %", value: ultimo.molPerc != null ? `${ultimo.molPerc.toFixed(1)}%` : "—" },
+          { label: "Poltrone", value: ultimo.poltrone ?? "—" },
+          { label: "Ric./Poltrona", value: fmtEuro(ultimo.ricaviPoltrona) },
+        ].map(({ label, value }) => (
+          <div key={label} style={{ background: "var(--surface)", borderRadius: 8, padding: "8px 12px", minWidth: 110 }}>
+            <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 500, marginTop: 2 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      <ResponsiveContainer width="100%" height={220}>
+        <ComposedChart data={history} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+          <XAxis dataKey="anno" tick={{ fontSize: 11 }} />
+          <YAxis yAxisId="r" tickFormatter={v => `${(v/1000).toFixed(0)}k`} tick={{ fontSize: 10 }} width={44} />
+          <YAxis yAxisId="m" orientation="right" tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} domain={[0, 50]} />
+          <Tooltip formatter={(v, name) => name === "MOL %" ? `${v?.toFixed(1)}%` : fmtEuro(v)} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar yAxisId="r" dataKey="ricavi" name="Ricavi €" fill="#6366f1" opacity={0.85} radius={[4,4,0,0]} />
+          <Line yAxisId="m" dataKey="molPerc" name="MOL %" stroke="#f59e0b" strokeWidth={2} dot={{ r: 4 }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 }}>
+        Benchmark MOL: <span style={{ color: "#854F0B", fontWeight: 500 }}>15–20%</span>
+      </div>
     </div>
   );
 }
@@ -231,42 +311,49 @@ export default function Dashboard() {
               </select>
             </div>
             {selectedClient && (
-              <Card>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-                  <div style={{ width: 42, height: 42, borderRadius: "50%", background: "#E6F1FB", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 500, fontSize: 14, color: "#185FA5", flexShrink: 0 }}>
-                    {selectedClient.name.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 500, fontSize: 15 }}>{selectedClient.name}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
-                      <span>Coach: {selectedClient.coachName}</span>
-                      <Badge level={selectedClient.level} />
-                      {selectedClient.lastUpdate && <span>Aggiornato: {new Date(selectedClient.lastUpdate).toLocaleDateString("it")}</span>}
+              <>
+                <Card>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                    <div style={{ width: 42, height: 42, borderRadius: "50%", background: "#E6F1FB", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 500, fontSize: 14, color: "#185FA5", flexShrink: 0 }}>
+                      {selectedClient.name.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 500, fontSize: 15 }}>{selectedClient.name}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
+                        <span>Coach: {selectedClient.coachName}</span>
+                        <Badge level={selectedClient.level} />
+                        {selectedClient.lastUpdate && <span>Aggiornato: {new Date(selectedClient.lastUpdate).toLocaleDateString("it")}</span>}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>KPI vs benchmark</div>
-                {Object.keys(BENCHMARKS).map(k => {
-                  const val = selectedClient.kpis[k];
-                  if (val===null||val===undefined) return null;
-                  const b = BENCHMARKS[k];
-                  const status = getStatus(k,val);
-                  const color = STATUS_COLOR[status];
-                  const bg = STATUS_BG[status];
-                  const benchLabel = b.invert?`< ${b.format(b.max)}`:`${b.format(b.min)} – ${b.format(b.max)}`;
-                  return (
-                    <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "0.5px solid var(--border)" }}>
-                      <span style={{ flex: 1, fontSize: 13, color: "var(--text-secondary)" }}>{b.label}</span>
-                      <span style={{ fontSize: 13, fontWeight: 500, background: bg, color, padding: "2px 8px", borderRadius: 6 }}>{b.format(val)}</span>
-                      <span style={{ fontSize: 11, color: "var(--text-tertiary)", minWidth: 90, textAlign: "right" }}>{benchLabel}</span>
-                    </div>
-                  );
-                })}
-                {Object.values(selectedClient.kpis).every(v=>v===null||v===undefined) && <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "1rem 0", textAlign: "center" }}>Nessun dato disponibile per questo cliente.</div>}
-              </Card>
+                  <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>KPI vs benchmark</div>
+                  {Object.keys(BENCHMARKS).map(k => {
+                    const val = selectedClient.kpis[k];
+                    if (val===null||val===undefined) return null;
+                    const b = BENCHMARKS[k];
+                    const status = getStatus(k,val);
+                    const color = STATUS_COLOR[status];
+                    const bg = STATUS_BG[status];
+                    const benchLabel = b.invert?`< ${b.format(b.max)}`:`${b.format(b.min)} – ${b.format(b.max)}`;
+                    return (
+                      <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "0.5px solid var(--border)" }}>
+                        <span style={{ flex: 1, fontSize: 13, color: "var(--text-secondary)" }}>{b.label}</span>
+                        <span style={{ fontSize: 13, fontWeight: 500, background: bg, color, padding: "2px 8px", borderRadius: 6 }}>{b.format(val)}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-tertiary)", minWidth: 90, textAlign: "right" }}>{benchLabel}</span>
+                      </div>
+                    );
+                  })}
+                  {Object.values(selectedClient.kpis).every(v=>v===null||v===undefined) && <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "1rem 0", textAlign: "center" }}>Nessun dato disponibile per questo cliente.</div>}
+                </Card>
+
+                <Card title="Storico pluriennale">
+                  <HistoryChart clienteName={selectedClient.name} coachName={selectedClient.coachName} />
+                </Card>
+              </>
             )}
           </div>
         )}
+
         <div style={{ fontSize: 11, color: "var(--text-tertiary)", textAlign: "center", marginTop: "2rem" }}>
           {data.updatedAt && `Dati caricati: ${new Date(data.updatedAt).toLocaleString("it")}`}
         </div>
