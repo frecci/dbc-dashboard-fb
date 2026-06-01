@@ -3,8 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { BENCHMARKS, getStatus, avgKpis } from "@/lib/kpi";
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ResponsiveContainer, ReferenceLine, RadarChart,
-  PolarGrid, PolarAngleAxis, Radar
+  Tooltip, Legend, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 
 const STATUS_COLOR = { green: "#3B6D11", yellow: "#854F0B", red: "#A32D2D", gray: "#5F5E5A" };
@@ -14,26 +13,30 @@ const LEVEL_STYLE  = {
   avanzato: { bg: "#EEEDFE", color: "#534AB7", label: "Avanzato" },
   quantico: { bg: "#E1F5EE", color: "#0F6E56", label: "Quantico" },
 };
-const COACH_COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#3b82f6","#8b5cf6","#f97316","#06b6d4"];
-const COACH_NAMES  = ["sabrina","silvia","alex","federica","frecci","frency","marica","ghiro"];
-const HISTORY_FILE_ID = process.env.NEXT_PUBLIC_HISTORY_FILE_ID || "";
 
-// Benchmark riferimento per storico
-const BENCH = {
-  ricaviPoltrona: { min: 200000, max: 250000, label: "Ricavi/Poltrona", fmt: v => `€${(v/1000).toFixed(0)}k` },
-  molPerc:        { min: 15,     max: 20,     label: "MOL %",           fmt: v => `${v.toFixed(1)}%` },
-  crescitaRicavi: { min: 10,     max: null,   label: "Crescita Ricavi", fmt: v => `+${v.toFixed(1)}%` },
-};
+// Coach principali vs "altri"
+const COACH_PRINCIPALI = ["sabrina", "silvia", "alex", "federica"];
+const COACH_ALTRI      = ["frecci", "frency", "marica", "ghiro"];
+const COACH_NAMES      = [...COACH_PRINCIPALI, ...COACH_ALTRI];
+const COACH_COLORS     = ["#6366f1","#f59e0b","#10b981","#3b82f6","#94a3b8"];
+// indici: sabrina=0, silvia=1, alex=2, federica=3, altri=4
+
+const HISTORY_FILE_ID = process.env.NEXT_PUBLIC_HISTORY_FILE_ID || "";
 
 function fmtEuro(v) {
   if (v == null) return "—";
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(v);
 }
 function fmtPct(v) { return v == null ? "—" : `${v.toFixed(1)}%`; }
+
 function statusColor(val, min, max) {
   if (val == null) return "#888";
-  if (max != null && val >= min && val <= max) return "#3B6D11";
-  if (max == null && val >= min) return "#3B6D11";
+  if (max != null) {
+    if (val >= min && val <= max) return "#3B6D11";
+    if (val >= min * 0.85 && val <= max * 1.15) return "#854F0B";
+    return "#A32D2D";
+  }
+  if (val >= min) return "#3B6D11";
   if (val >= min * 0.85) return "#854F0B";
   return "#A32D2D";
 }
@@ -97,56 +100,95 @@ function Card({ title, children }) {
   );
 }
 
-// ─── Calcola metriche aggregate per un set di clienti ─────────────────────────
-function calcCoachMetrics(clienti) {
+function avg(arr) {
+  const vals = arr.filter(v => v != null && !isNaN(v));
+  return vals.length ? vals.reduce((a,b) => a+b, 0) / vals.length : null;
+}
+
+function calcMetrics(clienti) {
   if (!clienti || clienti.length === 0) return null;
-
-  const ricaviPoltrona = clienti.flatMap(c => c.chartData.map(d => d.ricaviPoltrona).filter(v => v != null));
+  const ricaviPoltrona = clienti.flatMap(c => c.chartData.map(d => d.ricaviPoltrona).filter(v => v != null && v > 0));
   const molPercs       = clienti.flatMap(c => c.chartData.map(d => d.molPerc).filter(v => v != null));
-
-  // Crescita media ricavi anno su anno per ogni cliente
   const crescite = clienti.map(c => {
-    const anni = c.chartData.filter(d => d.ricavi != null);
+    const anni = c.chartData.filter(d => d.ricavi != null && d.ricavi > 0);
     if (anni.length < 2) return null;
-    const primo = anni[0].ricavi, ultimo = anni[anni.length - 1].ricavi;
-    return primo > 0 ? ((ultimo - primo) / primo) * 100 : null;
+    return ((anni[anni.length-1].ricavi - anni[0].ricavi) / anni[0].ricavi) * 100;
   }).filter(v => v != null);
-
-  // Incremento MOL% medio
-  const molCrescite = clienti.map(c => {
-    const anni = c.chartData.filter(d => d.molPerc != null);
-    if (anni.length < 2) return null;
-    return anni[anni.length - 1].molPerc - anni[0].molPerc;
-  }).filter(v => v != null);
-
-  const avg = arr => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : null;
 
   return {
-    nClienti:          clienti.length,
-    anniMedi:          avg(clienti.map(c => c.anniCoaching || c.chartData.length)),
-    ricaviPoltrMedio:  avg(ricaviPoltrona),
-    molPercMedio:      avg(molPercs),
-    crescitaRicavi:    avg(crescite),
-    deltaMol:          avg(molCrescite),
-    topRicavi:         Math.max(...clienti.map(c => c.ultimiRicavi || 0).filter(v => v > 0)),
+    nClienti:         clienti.length,
+    anniMedi:         avg(clienti.map(c => c.anniCoaching || c.chartData.length)),
+    ricaviPoltrMedio: avg(ricaviPoltrona),
+    molPercMedio:     avg(molPercs),
+    crescitaRicavi:   avg(crescite),
+    topRicavi:        Math.max(0, ...clienti.map(c => c.ultimiRicavi || 0)),
   };
 }
 
-// ─── Grafico trend ricavi per coach (linee) ───────────────────────────────────
-function TrendChart({ coachData }) {
-  // Costruisce dataset: per ogni anno, media ricavi di tutti i coach
+// ─── Grafici confronto ────────────────────────────────────────────────────────
+function BenchmarkChart({ groups }) {
+  const dataRic = groups.filter(g => g.metrics?.ricaviPoltrMedio).map(g => ({
+    coach: g.label,
+    ricaviPoltrona: Math.round(g.metrics.ricaviPoltrMedio),
+  }));
+  const dataMol = groups.filter(g => g.metrics?.molPercMedio != null).map(g => ({
+    coach: g.label,
+    molPerc: Math.round(g.metrics.molPercMedio * 10) / 10,
+  }));
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div>
+        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8, textTransform: "uppercase", letterSpacing: ".06em" }}>Ricavi / Poltrona vs benchmark</div>
+        {dataRic.length === 0 ? <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "1rem 0" }}>Dati non disponibili</div> : (
+          <ResponsiveContainer width="100%" height={Math.max(180, dataRic.length * 40)}>
+            <ComposedChart data={dataRic} layout="vertical" margin={{ top: 0, right: 80, left: 70, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+              <XAxis type="number" tickFormatter={v => `${(v/1000).toFixed(0)}k`} tick={{ fontSize: 10 }} />
+              <YAxis type="category" dataKey="coach" tick={{ fontSize: 12 }} width={65} />
+              <Tooltip formatter={v => fmtEuro(v)} />
+              <ReferenceLine x={200000} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "€200k", fontSize: 9, fill: "#3B6D11", position: "top" }} />
+              <ReferenceLine x={250000} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "€250k", fontSize: 9, fill: "#3B6D11", position: "top" }} />
+              <Bar dataKey="ricaviPoltrona" name="Ricavi/Poltrona" fill="#6366f1" radius={[0,4,4,0]}
+                label={{ position: "right", formatter: v => fmtEuro(v), fontSize: 10, fill: "var(--text-primary)" }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+      <div>
+        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8, textTransform: "uppercase", letterSpacing: ".06em" }}>MOL % medio vs benchmark</div>
+        {dataMol.length === 0 ? <div style={{ fontSize: 12, color: "var(--text-tertiary)", padding: "1rem 0" }}>Dati non disponibili</div> : (
+          <ResponsiveContainer width="100%" height={Math.max(180, dataMol.length * 40)}>
+            <ComposedChart data={dataMol} layout="vertical" margin={{ top: 0, right: 60, left: 70, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+              <XAxis type="number" tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} />
+              <YAxis type="category" dataKey="coach" tick={{ fontSize: 12 }} width={65} />
+              <Tooltip formatter={v => fmtPct(v)} />
+              <ReferenceLine x={15} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "15%", fontSize: 9, fill: "#3B6D11", position: "top" }} />
+              <ReferenceLine x={20} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "20%", fontSize: 9, fill: "#3B6D11", position: "top" }} />
+              <Bar dataKey="molPerc" name="MOL %" fill="#f59e0b" radius={[0,4,4,0]}
+                label={{ position: "right", formatter: v => fmtPct(v), fontSize: 10, fill: "var(--text-primary)" }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TrendChart({ groups }) {
   const allYears = [...new Set(
-    coachData.flatMap(cd => cd.clienti.flatMap(c => c.chartData.map(d => d.anno)))
+    groups.flatMap(g => g.clienti.flatMap(c => c.chartData.map(d => d.anno)))
   )].sort();
 
   const data = allYears.map(anno => {
     const point = { anno };
-    coachData.forEach(cd => {
-      const vals = cd.clienti.flatMap(c => {
+    groups.forEach(g => {
+      const vals = g.clienti.flatMap(c => {
         const d = c.chartData.find(x => x.anno === anno);
         return d?.ricavi ? [d.ricavi] : [];
       });
-      point[cd.coach] = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+      point[g.label] = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0)/vals.length) : null;
     });
     return point;
   });
@@ -159,105 +201,56 @@ function TrendChart({ coachData }) {
         <YAxis tickFormatter={v => `${(v/1000).toFixed(0)}k`} tick={{ fontSize: 10 }} width={48} />
         <Tooltip formatter={v => fmtEuro(v)} />
         <Legend wrapperStyle={{ fontSize: 12 }} />
-        {coachData.map((cd, i) => (
-          <Line key={cd.coach} dataKey={cd.coach} name={cd.coach} stroke={COACH_COLORS[i]} strokeWidth={2} dot={{ r: 3 }} connectNulls />
+        {groups.map((g, i) => (
+          <Line key={g.label} dataKey={g.label} name={g.label} stroke={COACH_COLORS[i] || "#94a3b8"} strokeWidth={2} dot={{ r: 3 }} connectNulls />
         ))}
       </ComposedChart>
     </ResponsiveContainer>
   );
 }
 
-// ─── Grafico confronto coach vs benchmark ────────────────────────────────────
-function BenchmarkChart({ coachMetrics }) {
-  const data = coachMetrics.map(cm => ({
-    coach: cm.coach,
-    ricaviPoltrona: cm.metrics?.ricaviPoltrMedio ? Math.round(cm.metrics.ricaviPoltrMedio) : null,
-    molPerc: cm.metrics?.molPercMedio ? Math.round(cm.metrics.molPercMedio * 10) / 10 : null,
-  }));
-
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-      {/* Ricavi/Poltrona */}
-      <div>
-        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8, textTransform: "uppercase", letterSpacing: ".06em" }}>Ricavi / Poltrona vs benchmark</div>
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={data} layout="vertical" margin={{ top: 0, right: 60, left: 60, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-            <XAxis type="number" tickFormatter={v => `${(v/1000).toFixed(0)}k`} tick={{ fontSize: 10 }} />
-            <YAxis type="category" dataKey="coach" tick={{ fontSize: 11 }} width={55} />
-            <Tooltip formatter={v => fmtEuro(v)} />
-            <ReferenceLine x={200000} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "min", fontSize: 10, fill: "#3B6D11" }} />
-            <ReferenceLine x={250000} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "max", fontSize: 10, fill: "#3B6D11" }} />
-            <Bar dataKey="ricaviPoltrona" name="Ricavi/Poltrona" fill="#6366f1" radius={[0,4,4,0]}
-              label={{ position: "right", formatter: v => fmtEuro(v), fontSize: 10 }} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-      {/* MOL% */}
-      <div>
-        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8, textTransform: "uppercase", letterSpacing: ".06em" }}>MOL % medio vs benchmark</div>
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={data} layout="vertical" margin={{ top: 0, right: 60, left: 60, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-            <XAxis type="number" tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} />
-            <YAxis type="category" dataKey="coach" tick={{ fontSize: 11 }} width={55} />
-            <Tooltip formatter={v => fmtPct(v)} />
-            <ReferenceLine x={15} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "15%", fontSize: 10, fill: "#3B6D11" }} />
-            <ReferenceLine x={20} stroke="#3B6D11" strokeDasharray="4 2" label={{ value: "20%", fontSize: 10, fill: "#3B6D11" }} />
-            <Bar dataKey="molPerc" name="MOL %" fill="#f59e0b" radius={[0,4,4,0]}
-              label={{ position: "right", formatter: v => fmtPct(v), fontSize: 10 }} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-// ─── Card singolo coach ───────────────────────────────────────────────────────
-function CoachCard({ coachData, color, selected, onClick }) {
-  const m = coachData.metrics;
+function CoachCard({ group, color, selected, onClick }) {
+  const m = group.metrics;
   if (!m) return null;
-
-  const rpColor = statusColor(m.ricaviPoltrMedio, 200000, 250000);
-  const rpBg    = statusBg(m.ricaviPoltrMedio, 200000, 250000);
-  const molColor = statusColor(m.molPercMedio, 15, 20);
-  const molBg    = statusBg(m.molPercMedio, 15, 20);
+  const rpColor  = m.ricaviPoltrMedio ? statusColor(m.ricaviPoltrMedio, 200000, 250000) : "#888";
+  const rpBg     = m.ricaviPoltrMedio ? statusBg(m.ricaviPoltrMedio, 200000, 250000) : "var(--surface)";
+  const molColor = m.molPercMedio != null ? statusColor(m.molPercMedio, 15, 20) : "#888";
+  const molBg    = m.molPercMedio != null ? statusBg(m.molPercMedio, 15, 20) : "var(--surface)";
   const crescColor = m.crescitaRicavi >= 10 ? "#3B6D11" : m.crescitaRicavi >= 5 ? "#854F0B" : "#A32D2D";
 
   return (
-    <div onClick={onClick} style={{ background: "var(--card)", border: selected ? `2px solid ${color}` : "0.5px solid var(--border)", borderRadius: 12, padding: "1rem", cursor: "pointer", transition: "all 0.15s" }}>
+    <div onClick={onClick} style={{ background: "var(--card)", border: selected ? `2px solid ${color}` : "0.5px solid var(--border)", borderRadius: 12, padding: "1rem", cursor: "pointer" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
         <div>
-          <div style={{ fontWeight: 600, fontSize: 15, textTransform: "capitalize", marginBottom: 2 }}>{coachData.coach}</div>
+          <div style={{ fontWeight: 600, fontSize: 15, textTransform: "capitalize", marginBottom: 2 }}>{group.label}</div>
           <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{m.nClienti} clienti · {m.anniMedi?.toFixed(1)} anni medi</div>
         </div>
-        <div style={{ background: color + "20", color, fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 6, textTransform: "capitalize" }}>{coachData.coach}</div>
+        <div style={{ background: color + "20", color, fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 6 }}>●</div>
       </div>
-
-      {/* KPI pills */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
         <div style={{ background: rpBg, borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
           <div style={{ fontSize: 10, color: rpColor }}>Ric./Poltr.</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: rpColor }}>{m.ricaviPoltrMedio ? fmtEuro(m.ricaviPoltrMedio) : "—"}</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: rpColor }}>{m.ricaviPoltrMedio ? fmtEuro(m.ricaviPoltrMedio) : "—"}</div>
         </div>
         <div style={{ background: molBg, borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
           <div style={{ fontSize: 10, color: molColor }}>MOL %</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: molColor }}>{m.molPercMedio ? fmtPct(m.molPercMedio) : "—"}</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: molColor }}>{m.molPercMedio != null ? fmtPct(m.molPercMedio) : "—"}</div>
         </div>
         <div style={{ background: "var(--surface)", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
           <div style={{ fontSize: 10, color: "var(--text-tertiary)" }}>Crescita</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: crescColor }}>{m.crescitaRicavi != null ? `+${m.crescitaRicavi.toFixed(1)}%` : "—"}</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: crescColor }}>{m.crescitaRicavi != null ? `+${m.crescitaRicavi.toFixed(1)}%` : "—"}</div>
         </div>
       </div>
-
-      {/* Benchmark bar ricavi/poltrona */}
-      <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginBottom: 3 }}>Ricavi/Poltrona vs benchmark €200k–€250k</div>
-      <div style={{ height: 6, background: "var(--surface)", borderRadius: 3, position: "relative", marginBottom: 8 }}>
-        <div style={{ position: "absolute", left: `${Math.min((200000/300000)*100, 100)}%`, top: 0, bottom: 0, width: 2, background: "#3B6D11", opacity: 0.5 }} />
-        <div style={{ position: "absolute", left: `${Math.min((250000/300000)*100, 100)}%`, top: 0, bottom: 0, width: 2, background: "#3B6D11", opacity: 0.5 }} />
-        {m.ricaviPoltrMedio && <div style={{ width: `${Math.min((m.ricaviPoltrMedio/300000)*100, 100)}%`, height: "100%", background: rpColor, borderRadius: 3 }} />}
-      </div>
-
+      {m.ricaviPoltrMedio && (
+        <>
+          <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginBottom: 3 }}>Ricavi/Poltrona vs €200k–€250k</div>
+          <div style={{ height: 6, background: "var(--surface)", borderRadius: 3, position: "relative", marginBottom: 8 }}>
+            <div style={{ position: "absolute", left: `${Math.min((200000/350000)*100,100)}%`, top: 0, bottom: 0, width: 2, background: "#3B6D11", opacity: 0.4 }} />
+            <div style={{ position: "absolute", left: `${Math.min((250000/350000)*100,100)}%`, top: 0, bottom: 0, width: 2, background: "#3B6D11", opacity: 0.4 }} />
+            <div style={{ width: `${Math.min((m.ricaviPoltrMedio/350000)*100,100)}%`, height: "100%", background: rpColor, borderRadius: 3 }} />
+          </div>
+        </>
+      )}
       <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
         Top ricavi: <span style={{ fontWeight: 500, color: "var(--text-primary)" }}>{m.topRicavi > 0 ? fmtEuro(m.topRicavi) : "—"}</span>
       </div>
@@ -265,49 +258,50 @@ function CoachCard({ coachData, color, selected, onClick }) {
   );
 }
 
-// ─── Drill-down clienti di un coach ──────────────────────────────────────────
-function ClientiDrillDown({ coachData, color }) {
-  const sorted = [...(coachData.clienti || [])].sort((a,b) => (b.ultimiRicavi||0) - (a.ultimiRicavi||0));
-
+function DrillDown({ group, color }) {
+  const sorted = [...group.clienti].sort((a,b) => (b.ultimiRicavi||0) - (a.ultimiRicavi||0));
   return (
-    <Card title={`Clienti di ${coachData.coach} (${sorted.length})`}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: 12 }}>
+    <Card title={`${group.label} — ${sorted.length} clienti`}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
         {sorted.map((cliente, idx) => {
-          const ultimo = cliente.chartData?.[cliente.chartData.length - 1];
+          const ultimo = cliente.chartData?.[cliente.chartData.length-1];
           const primo  = cliente.chartData?.[0];
-          const deltaRic = primo?.ricavi && ultimo?.ricavi ? ((ultimo.ricavi - primo.ricavi) / primo.ricavi * 100).toFixed(1) : null;
-
+          const delta  = primo?.ricavi && ultimo?.ricavi ? ((ultimo.ricavi-primo.ricavi)/primo.ricavi*100).toFixed(1) : null;
+          const coachLabel = cliente.coach || "";
           return (
             <div key={idx} style={{ background: "var(--surface)", borderRadius: 10, padding: "12px 14px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
                 <div>
                   <div style={{ fontWeight: 500, fontSize: 13 }}>{cliente.nome}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{cliente.anniCoaching || cliente.chartData?.length} anni · {cliente.location}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+                    {coachLabel && <span style={{ background: color+"20", color, padding: "1px 5px", borderRadius: 3, marginRight: 4, textTransform: "capitalize" }}>{coachLabel}</span>}
+                    {(cliente.anniCoaching || cliente.chartData?.length)} anni · {cliente.location}
+                  </div>
                 </div>
-                {deltaRic && <div style={{ fontSize: 15, fontWeight: 600, color: parseFloat(deltaRic) >= 0 ? "#3B6D11" : "#A32D2D" }}>+{deltaRic}%</div>}
+                {delta && <div style={{ fontSize: 14, fontWeight: 600, color: parseFloat(delta)>=0?"#3B6D11":"#A32D2D" }}>+{delta}%</div>}
               </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
                 {[
-                  { label: "Ricavi", value: fmtEuro(ultimo?.ricavi), ...( ultimo?.ricavi ? { bg: "var(--card)" } : {}) },
-                  { label: "MOL%", value: fmtPct(ultimo?.molPerc), color: ultimo?.molPerc ? statusColor(ultimo.molPerc, 15, 20) : null, bg: ultimo?.molPerc ? statusBg(ultimo.molPerc, 15, 20) : "var(--card)" },
-                  { label: "Ric/Poltr", value: fmtEuro(ultimo?.ricaviPoltrona), color: ultimo?.ricaviPoltrona ? statusColor(ultimo.ricaviPoltrona, 200000, 250000) : null, bg: ultimo?.ricaviPoltrona ? statusBg(ultimo.ricaviPoltrona, 200000, 250000) : "var(--card)" },
-                ].map(({ label, value, color: c, bg }) => (
-                  <div key={label} style={{ background: bg || "var(--card)", borderRadius: 5, padding: "3px 8px" }}>
+                  { label: "Ricavi", value: fmtEuro(ultimo?.ricavi) },
+                  { label: "MOL%", value: fmtPct(ultimo?.molPerc), c: ultimo?.molPerc != null ? statusColor(ultimo.molPerc,15,20) : null, bg: ultimo?.molPerc != null ? statusBg(ultimo.molPerc,15,20) : "var(--card)" },
+                  { label: "Ric/Poltr", value: fmtEuro(ultimo?.ricaviPoltrona), c: ultimo?.ricaviPoltrona ? statusColor(ultimo.ricaviPoltrona,200000,250000) : null, bg: ultimo?.ricaviPoltrona ? statusBg(ultimo.ricaviPoltrona,200000,250000) : "var(--card)" },
+                ].map(({ label, value, c, bg }) => (
+                  <div key={label} style={{ background: bg||"var(--card)", borderRadius: 5, padding: "3px 8px" }}>
                     <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>{label} </span>
-                    <span style={{ fontSize: 12, fontWeight: 500, color: c || "var(--text-primary)" }}>{value}</span>
+                    <span style={{ fontSize: 12, fontWeight: 500, color: c||"var(--text-primary)" }}>{value}</span>
                   </div>
                 ))}
               </div>
               {cliente.chartData && cliente.chartData.length > 1 && (
-                <ResponsiveContainer width="100%" height={80}>
+                <ResponsiveContainer width="100%" height={75}>
                   <ComposedChart data={cliente.chartData} margin={{ top: 0, right: 4, left: 0, bottom: 0 }}>
                     <XAxis dataKey="anno" tick={{ fontSize: 8 }} />
                     <YAxis yAxisId="r" hide />
-                    <YAxis yAxisId="m" hide domain={[0, 50]} />
-                    <Tooltip formatter={(v, name) => name === "MOL %" ? fmtPct(v) : fmtEuro(v)} />
+                    <YAxis yAxisId="m" hide domain={[0,50]} />
+                    <Tooltip formatter={(v,name) => name==="MOL %" ? fmtPct(v) : fmtEuro(v)} />
                     <Bar yAxisId="r" dataKey="ricavi" name="Ricavi" fill={color} opacity={0.7} radius={[2,2,0,0]} />
                     <Line yAxisId="m" dataKey="molPerc" name="MOL %" stroke="#f59e0b" strokeWidth={1.5} dot={false} />
-                    <ReferenceLine yAxisId="m" y={15} stroke="#3B6D11" strokeDasharray="3 2" strokeOpacity={0.5} />
+                    <ReferenceLine yAxisId="m" y={15} stroke="#3B6D11" strokeDasharray="3 2" strokeOpacity={0.4} />
                   </ComposedChart>
                 </ResponsiveContainer>
               )}
@@ -321,9 +315,9 @@ function ClientiDrillDown({ coachData, color }) {
 
 // ─── STORICO TAB ─────────────────────────────────────────────────────────────
 function StoricoView() {
-  const [allHistory, setAllHistory]     = useState([]);
+  const [rawData, setRawData]           = useState([]);
   const [loading, setLoading]           = useState(true);
-  const [selectedCoach, setSelectedCoach] = useState(null);
+  const [selectedGroup, setSelectedGroup] = useState(null);
 
   useEffect(() => {
     if (!HISTORY_FILE_ID) { setLoading(false); return; }
@@ -331,11 +325,11 @@ function StoricoView() {
       COACH_NAMES.map(coach =>
         fetch(`/api/history?fileId=${HISTORY_FILE_ID}&coach=${coach}`)
           .then(r => r.json())
-          .then(d => ({ coach, clienti: d.clienti || [] }))
+          .then(d => ({ coach, clienti: (d.clienti || []).map(c => ({ ...c, coach })) }))
           .catch(() => ({ coach, clienti: [] }))
       )
     ).then(results => {
-      setAllHistory(results.filter(r => r.clienti.length > 0));
+      setRawData(results.filter(r => r.clienti.length > 0));
       setLoading(false);
     });
   }, []);
@@ -347,85 +341,70 @@ function StoricoView() {
     </div>
   );
 
-  if (allHistory.length === 0) return (
-    <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "2rem", textAlign: "center" }}>
-      Nessun dato storico disponibile.
-    </div>
+  if (rawData.length === 0) return (
+    <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "2rem", textAlign: "center" }}>Nessun dato storico disponibile.</div>
   );
 
-  // Calcola metriche per ogni coach
-  const coachMetrics = allHistory.map((cd, i) => ({
-    ...cd,
-    color: COACH_COLORS[i],
-    metrics: calcCoachMetrics(cd.clienti),
-  }));
+  // Costruisce gruppi: coach principali + "Altri account"
+  const groups = [];
+  COACH_PRINCIPALI.forEach((name, i) => {
+    const found = rawData.find(r => r.coach === name);
+    if (found && found.clienti.length > 0) {
+      groups.push({ label: name, clienti: found.clienti, color: COACH_COLORS[i] });
+    }
+  });
+  // Aggrega gli "altri"
+  const altriClienti = rawData
+    .filter(r => COACH_ALTRI.includes(r.coach))
+    .flatMap(r => r.clienti);
+  if (altriClienti.length > 0) {
+    groups.push({ label: "altri account", clienti: altriClienti, color: COACH_COLORS[4] });
+  }
 
-  // Metriche aggregate totali
-  const tuttiClienti = allHistory.flatMap(cd => cd.clienti);
-  const totali = calcCoachMetrics(tuttiClienti);
+  // Aggiunge metriche a ogni gruppo
+  const groupsWithMetrics = groups.map(g => ({ ...g, metrics: calcMetrics(g.clienti) }));
 
-  const selectedData = selectedCoach ? coachMetrics.find(cm => cm.coach === selectedCoach) : null;
+  // Totali aggregati
+  const tuttiClienti = groups.flatMap(g => g.clienti);
+  const totali = calcMetrics(tuttiClienti);
+
+  const selectedData = selectedGroup ? groupsWithMetrics.find(g => g.label === selectedGroup) : null;
 
   return (
     <div>
-      {/* KPI aggregati totali */}
+      {/* KPI aggregati */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: "1.5rem" }}>
-        <MetricCard label="Clienti totali" value={totali?.nClienti || 0} sub={`${allHistory.length} coach`} />
-        <MetricCard
-          label="Ric./Poltrona medio"
-          value={totali?.ricaviPoltrMedio ? fmtEuro(totali.ricaviPoltrMedio) : "—"}
-          sub="bench: €200k–€250k"
-          subColor={totali?.ricaviPoltrMedio ? statusColor(totali.ricaviPoltrMedio, 200000, 250000) : undefined}
-        />
-        <MetricCard
-          label="MOL % medio"
-          value={totali?.molPercMedio ? fmtPct(totali.molPercMedio) : "—"}
-          sub="bench: 15–20%"
-          subColor={totali?.molPercMedio ? statusColor(totali.molPercMedio, 15, 20) : undefined}
-        />
-        <MetricCard
-          label="Crescita ricavi media"
-          value={totali?.crescitaRicavi != null ? `+${totali.crescitaRicavi.toFixed(1)}%` : "—"}
-          sub="dall'anno zero ad oggi"
-          subColor={totali?.crescitaRicavi >= 10 ? "#3B6D11" : "#854F0B"}
-        />
-        <MetricCard
-          label="Anni coaching medi"
-          value={totali?.anniMedi ? totali.anniMedi.toFixed(1) : "—"}
-          sub="anni"
-        />
+        <MetricCard label="Clienti totali" value={totali?.nClienti || 0} sub={`${groups.length} gruppi`} />
+        <MetricCard label="Ric./Poltrona medio" value={totali?.ricaviPoltrMedio ? fmtEuro(totali.ricaviPoltrMedio) : "—"} sub="bench: €200k–€250k" subColor={totali?.ricaviPoltrMedio ? statusColor(totali.ricaviPoltrMedio,200000,250000) : undefined} />
+        <MetricCard label="MOL % medio" value={totali?.molPercMedio != null ? fmtPct(totali.molPercMedio) : "—"} sub="bench: 15–20%" subColor={totali?.molPercMedio != null ? statusColor(totali.molPercMedio,15,20) : undefined} />
+        <MetricCard label="Crescita ricavi media" value={totali?.crescitaRicavi != null ? `+${totali.crescitaRicavi.toFixed(1)}%` : "—"} sub="dall'anno zero ad oggi" subColor={totali?.crescitaRicavi >= 10 ? "#3B6D11" : "#854F0B"} />
+        <MetricCard label="Anni coaching medi" value={totali?.anniMedi ? totali.anniMedi.toFixed(1) : "—"} sub="anni" />
       </div>
 
-      {/* Grafici confronto vs benchmark */}
-      <Card title="Confronto coach vs benchmark">
-        <BenchmarkChart coachMetrics={coachMetrics} />
+      <Card title="Confronto gruppi vs benchmark">
+        <BenchmarkChart groups={groupsWithMetrics} />
       </Card>
 
-      {/* Trend ricavi nel tempo per coach */}
-      <Card title="Trend ricavi medi per anno — tutti i coach">
-        <TrendChart coachData={allHistory} />
+      <Card title="Trend ricavi medi per anno">
+        <TrendChart groups={groupsWithMetrics} />
       </Card>
 
-      {/* Cards coach */}
       <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>
-        Performance per coach — clicca per vedere i clienti
+        Performance per gruppo — clicca per vedere i clienti
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12, marginBottom: "1.5rem" }}>
-        {coachMetrics.map((cm, i) => (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12, marginBottom: "1.5rem" }}>
+        {groupsWithMetrics.map(g => (
           <CoachCard
-            key={cm.coach}
-            coachData={cm}
-            color={cm.color}
-            selected={selectedCoach === cm.coach}
-            onClick={() => setSelectedCoach(selectedCoach === cm.coach ? null : cm.coach)}
+            key={g.label}
+            group={g}
+            color={g.color}
+            selected={selectedGroup === g.label}
+            onClick={() => setSelectedGroup(selectedGroup === g.label ? null : g.label)}
           />
         ))}
       </div>
 
-      {/* Drill-down clienti coach selezionato */}
-      {selectedData && (
-        <ClientiDrillDown coachData={selectedData} color={selectedData.color} />
-      )}
+      {selectedData && <DrillDown group={selectedData} color={selectedData.color} />}
     </div>
   );
 }
@@ -478,13 +457,13 @@ export default function Dashboard() {
     </div>
   );
 
-  const allClients     = data.coaches.flatMap(c => c.clients.map(cl => ({ ...cl, coachName: c.name })));
+  const allClients      = data.coaches.flatMap(c => c.clients.map(cl => ({ ...cl, coachName: c.name })));
   const filteredClients = levelFilter === "all" ? allClients : allClients.filter(c => c.level === levelFilter);
-  const levelCounts    = { base: allClients.filter(c => c.level === "base").length, avanzato: allClients.filter(c => c.level === "avanzato").length, quantico: allClients.filter(c => c.level === "quantico").length };
-  const globalAvg      = avgKpis(filteredClients.map(c => c.kpis));
-  const globalKeys     = Object.keys(BENCHMARKS);
-  const globalGreen    = globalKeys.filter(k => globalAvg[k] !== null && getStatus(k, globalAvg[k]) === "green").length;
-  const globalPct      = globalKeys.length ? Math.round(globalGreen / globalKeys.length * 100) : 0;
+  const levelCounts     = { base: allClients.filter(c => c.level === "base").length, avanzato: allClients.filter(c => c.level === "avanzato").length, quantico: allClients.filter(c => c.level === "quantico").length };
+  const globalAvg       = avgKpis(filteredClients.map(c => c.kpis));
+  const globalKeys      = Object.keys(BENCHMARKS);
+  const globalGreen     = globalKeys.filter(k => globalAvg[k] !== null && getStatus(k, globalAvg[k]) === "green").length;
+  const globalPct       = globalKeys.length ? Math.round(globalGreen / globalKeys.length * 100) : 0;
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text-primary)", fontFamily: "system-ui, sans-serif" }}>
@@ -548,12 +527,12 @@ export default function Dashboard() {
           <div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: "1.25rem" }}>
               {data.coaches.map(coach => {
-                const avg = avgKpis(coach.clients.map(c => c.kpis));
+                const avg2 = avgKpis(coach.clients.map(c => c.kpis));
                 return (
                   <div key={coach.id} onClick={() => setSelectedCoach(selectedCoach?.id===coach.id?null:coach)} style={{ background: "var(--card)", border: selectedCoach?.id===coach.id?"2px solid #185FA5":"0.5px solid var(--border)", borderRadius: 12, padding: "1rem", cursor: "pointer" }}>
                     <div style={{ fontWeight: 500, fontSize: 14, marginBottom: 4 }}>👤 {coach.name}</div>
                     <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10 }}>{coach.clients.length} clienti</div>
-                    <ScoreBar kpis={avg} />
+                    <ScoreBar kpis={avg2} />
                   </div>
                 );
               })}
